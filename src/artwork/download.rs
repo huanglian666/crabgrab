@@ -347,6 +347,23 @@ mod tests {
     }
 
     #[test]
+    fn creates_missing_output_parent_directories() {
+        let root = tempdir().unwrap();
+        let output = root.path().join("missing/parents/artwork");
+        assert!(!output.exists());
+        let fetcher = FakeFetcher {
+            calls: Cell::new(0),
+            fail_on: None,
+        };
+
+        let installed = install_artwork(&fetcher, &artwork(), &output).unwrap();
+
+        assert!(output.is_dir());
+        assert!(installed.background.is_file());
+        assert!(installed.cover.is_file());
+    }
+
+    #[test]
     fn second_download_failure_preserves_existing_files() {
         let output = tempdir().unwrap();
         let background = output.path().join("background/background.jpg");
