@@ -21,7 +21,7 @@
 
 **涉及文件：**
 
-- 保留：`prompts/project-initialization.md`
+- 保留：`prompts/00-project-initialization-design.md`
 - 从 `origin/main` 获取：`LICENSE`
 
 **输入与产出：**
@@ -70,8 +70,8 @@ git status --short
 - 添加：`Cargo.lock`
 - 添加：`src/main.rs`
 - 保留：`LICENSE`
-- 保留：`prompts/project-initialization.md`
-- 添加：`prompts/project-initialization-plan.md`
+- 保留：`prompts/00-project-initialization-design.md`
+- 添加：`prompts/00-project-initialization-plan.md`
 
 **输入与产出：**
 
@@ -111,7 +111,7 @@ git status --short --ignored
 执行：
 
 ```bash
-git add .gitignore Cargo.toml Cargo.lock src/main.rs prompts/project-initialization-plan.md
+git add .gitignore Cargo.toml Cargo.lock src/main.rs prompts/00-project-initialization-plan.md
 git commit -m "chore: initialize CrabGrab project"
 ```
 

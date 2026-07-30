@@ -61,4 +61,44 @@ fn help_flag_succeeds_and_displays_help() {
     assert!(visible.contains("--version"));
     assert!(visible.contains("-h"));
     assert!(visible.contains("--help"));
+    assert!(visible.contains("-i"));
+    assert!(visible.contains("--id"));
+    assert!(visible.contains("-o"));
+    assert!(visible.contains("--output"));
+    assert!(visible.contains("config"));
+}
+
+#[test]
+fn download_arguments_must_be_provided_together() {
+    let missing_output = crabgrab(&["-i", "tmdb-movie-550"]);
+    let missing_id = crabgrab(&["-o", "/tmp/crabgrab-test-output"]);
+
+    assert!(!missing_output.status.success());
+    assert!(visible_output(&missing_output).contains("--output"));
+    assert!(!missing_id.status.success());
+    assert!(visible_output(&missing_id).contains("--id"));
+}
+
+#[test]
+fn invalid_resource_id_fails_before_configuration_lookup() {
+    let output = crabgrab(&["-i", "invalid", "-o", "/tmp/crabgrab-test-output"]);
+    let visible = visible_output(&output);
+
+    assert!(!output.status.success());
+    assert!(visible.contains("tmdb-movie-550"));
+    assert!(!visible.contains("config init"));
+}
+
+#[test]
+fn download_arguments_conflict_with_config_subcommand() {
+    let output = crabgrab(&[
+        "-i",
+        "tmdb-movie-550",
+        "-o",
+        "/tmp/crabgrab-test-output",
+        "config",
+        "init",
+    ]);
+
+    assert!(!output.status.success());
 }
