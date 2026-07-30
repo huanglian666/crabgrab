@@ -1,0 +1,45 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Environment files (keep shareable examples)
+.env
+.env.*
+!.env.example
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows metadata
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# JetBrains and RustRover user state
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/usage.statistics.xml
+.idea/**/dictionaries/
+.idea/**/shelf/
+.idea/**/httpRequests/
+.idea/**/dataSources.local.xml
+
+# VS Code user-specific state
+.vscode/settings.json
+.vscode/*.code-workspace
+
+# Logs, editor swap files, backups, and temporary files
+*.log
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+/tmp/
+/temp/
+/.cache/
