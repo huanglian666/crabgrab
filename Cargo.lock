@@ -464,6 +464,7 @@ dependencies = [
  "clap",
  "directories",
  "httpmock",
+ "rand",
  "reqwest",
  "serde",
  "serde_json",

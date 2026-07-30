@@ -1,7 +1,9 @@
 mod install;
+mod probe;
 mod process;
-mod tool;
+pub(crate) mod tool;
 
+pub use probe::{MediaProbe, MediaProber, SubtitleTrack, parse_probe_json};
 pub use process::ProcessMediaAnalyzer;
 
 use std::fs::{self, File};
@@ -99,7 +101,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{AnalyzeError, MediaAnalyzer, generate_report};
+    use super::{AnalyzeError, MediaAnalyzer, generate_report, parse_probe_json};
 
     struct FakeAnalyzer(Result<String, AnalyzeError>);
 
@@ -170,5 +172,54 @@ mod tests {
             fs::read_to_string(output.join("mediainfo.txt")).unwrap(),
             "old\n"
         );
+    }
+
+    #[test]
+    fn parses_duration_video_and_subtitle_tracks_from_json() {
+        let json = r#"{
+            "media": {
+                "@ref": "Movie.mkv",
+                "track": [
+                    {"@type":"General","Duration":"3723.456"},
+                    {"@type":"Video","Format":"AVC"},
+                    {"@type":"Text","StreamKindPos":"1","Format":"ASS","Language":"zh-CN","Default":"Yes"},
+                    {"@type":"Text","StreamKindPos":"2","Format":"UTF-8","Language":"en","Default":"No"}
+                ]
+            }
+        }"#;
+
+        let probe = parse_probe_json(json).unwrap();
+
+        assert_eq!(probe.duration_ms, 3_723_456);
+        assert!(probe.has_video);
+        assert_eq!(probe.subtitles.len(), 2);
+        assert_eq!(probe.subtitles[0].stream_kind_position, 1);
+        assert_eq!(probe.subtitles[0].language.as_deref(), Some("zh-CN"));
+        assert!(probe.subtitles[0].is_default);
+        assert_eq!(probe.subtitles[0].format, "ASS");
+        assert_eq!(probe.subtitles[1].stream_kind_position, 2);
+        assert!(!probe.subtitles[1].is_default);
+    }
+
+    #[test]
+    fn rejects_probe_without_video_track() {
+        let json = r#"{"media":{"track":[{"@type":"General","Duration":"60.000"}]}}"#;
+
+        let error = parse_probe_json(json).unwrap_err();
+
+        assert!(error.to_string().contains("video"));
+    }
+
+    #[test]
+    fn rejects_probe_without_positive_duration() {
+        for duration in ["0", "not-a-number"] {
+            let json = format!(
+                r#"{{"media":{{"track":[{{"@type":"General","Duration":"{duration}"}},{{"@type":"Video"}}]}}}}"#
+            );
+
+            let error = parse_probe_json(&json).unwrap_err();
+
+            assert!(error.to_string().contains("duration"));
+        }
     }
 }

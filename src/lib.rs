@@ -4,3 +4,4 @@ pub mod config;
 pub mod domain;
 pub mod media_info;
 pub mod providers;
+pub mod screenshot;

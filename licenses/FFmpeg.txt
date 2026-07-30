@@ -1,0 +1,17 @@
+FFmpeg 8.1.2 binary distribution notice
+https://ffmpeg.org/
+
+CrabGrab uses fixed GPL builds linked from FFmpeg's official download page.
+The macOS arm64 build is published by Martin Riedl and the Windows x64 build
+is published by BtbN. Exact immutable asset URLs and hashes are recorded in
+tools/ffmpeg-manifest.toml.
+
+The selected macOS arm64 and Windows x64 binary distributions are licensed
+under GNU GPL version 3 or any later version. The platform-specific complete
+license file is downloaded, hash-verified, and distributed alongside FFmpeg.
+
+Corresponding FFmpeg source:
+https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz
+
+Build provenance and exact binary, archive, and license SHA-256 values are
+recorded in tools/ffmpeg-manifest.toml.

@@ -7,7 +7,7 @@ use directories::BaseDirs;
 use serde::Deserialize;
 use thiserror::Error;
 
-const CONFIG_TEMPLATE: &str = "[tmdb]\napi_token = \"\"\nlanguage = \"zh-CN\"\n";
+const CONFIG_TEMPLATE: &str = "[tmdb]\napi_token = \"\"\nlanguage = \"zh-CN\"\n\n[screenshot]\ncount = 3\ntimestamps = []\nsubtitles = true\nsubtitle_languages = [\"zh-CN\", \"zh\", \"chs\", \"chi\"]\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigPaths {
@@ -38,12 +38,32 @@ impl fmt::Debug for SecretToken {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub tmdb: TmdbConfig,
+    pub screenshot: ScreenshotConfig,
 }
 
 #[derive(Debug, Clone)]
 pub struct TmdbConfig {
     pub api_token: SecretToken,
     pub language: String,
+}
+
+impl TmdbConfig {
+    pub(crate) fn require_token(self, path: &Path) -> Result<Self, ConfigError> {
+        if self.api_token.expose_for_request().is_empty() {
+            return Err(ConfigError::EmptyToken {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScreenshotConfig {
+    pub count: usize,
+    pub timestamps: Vec<String>,
+    pub subtitles: bool,
+    pub subtitle_languages: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +75,8 @@ pub struct LoadedConfig {
 #[derive(Debug, Deserialize)]
 struct RawAppConfig {
     tmdb: RawTmdbConfig,
+    #[serde(default)]
+    screenshot: RawScreenshotConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,8 +86,46 @@ struct RawTmdbConfig {
     language: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RawScreenshotConfig {
+    #[serde(default = "default_screenshot_count")]
+    count: usize,
+    #[serde(default)]
+    timestamps: Vec<String>,
+    #[serde(default = "default_subtitles")]
+    subtitles: bool,
+    #[serde(default = "default_subtitle_languages")]
+    subtitle_languages: Vec<String>,
+}
+
+impl Default for RawScreenshotConfig {
+    fn default() -> Self {
+        Self {
+            count: default_screenshot_count(),
+            timestamps: Vec::new(),
+            subtitles: default_subtitles(),
+            subtitle_languages: default_subtitle_languages(),
+        }
+    }
+}
+
 fn default_language() -> String {
     "zh-CN".to_owned()
+}
+
+fn default_screenshot_count() -> usize {
+    3
+}
+
+fn default_subtitles() -> bool {
+    true
+}
+
+fn default_subtitle_languages() -> Vec<String> {
+    ["zh-CN", "zh", "chs", "chi"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(Debug, Error)]
@@ -88,6 +148,10 @@ pub enum ConfigError {
     Parse { path: PathBuf },
     #[error("configuration {path} requires a non-empty [tmdb].api_token")]
     EmptyToken { path: PathBuf },
+    #[error("configuration {path} requires screenshot.count between 1 and 100")]
+    ScreenshotCount { path: PathBuf },
+    #[error("configuration {path} requires at least one [screenshot].subtitle_languages entry")]
+    SubtitleLanguages { path: PathBuf },
     #[error("configuration already exists at {0}; refusing to create another file")]
     AlreadyExists(PathBuf),
     #[error(
@@ -151,17 +215,37 @@ pub fn load_config(paths: &ConfigPaths) -> Result<LoadedConfig, ConfigError> {
     let raw: RawAppConfig =
         // 原始 TOML 错误可能包含 Token 所在行，对外只保留固定说明和文件路径。
         toml::from_str(&contents).map_err(|_| ConfigError::Parse { path: path.clone() })?;
-    let token = raw.tmdb.api_token.trim();
-    if token.is_empty() {
-        return Err(ConfigError::EmptyToken { path });
+    if !(1..=100).contains(&raw.screenshot.count) {
+        return Err(ConfigError::ScreenshotCount { path });
+    }
+    if raw.screenshot.subtitle_languages.is_empty()
+        || raw
+            .screenshot
+            .subtitle_languages
+            .iter()
+            .any(|language| language.trim().is_empty())
+    {
+        return Err(ConfigError::SubtitleLanguages { path });
     }
 
+    let token = raw.tmdb.api_token.trim();
     Ok(LoadedConfig {
         path,
         value: AppConfig {
             tmdb: TmdbConfig {
                 api_token: SecretToken::new(token),
                 language: raw.tmdb.language,
+            },
+            screenshot: ScreenshotConfig {
+                count: raw.screenshot.count,
+                timestamps: raw.screenshot.timestamps,
+                subtitles: raw.screenshot.subtitles,
+                subtitle_languages: raw
+                    .screenshot
+                    .subtitle_languages
+                    .into_iter()
+                    .map(|language| language.trim().to_owned())
+                    .collect(),
             },
         },
     })
@@ -265,7 +349,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ConfigPaths, init_config, load_config};
+    use super::{CONFIG_TEMPLATE, ConfigPaths, init_config, load_config};
 
     fn paths() -> (tempfile::TempDir, ConfigPaths) {
         let root = tempdir().unwrap();
@@ -335,14 +419,64 @@ mod tests {
     }
 
     #[test]
-    fn blank_token_is_rejected_without_leaking_its_value() {
+    fn blank_token_loads_for_non_tmdb_commands_with_screenshot_defaults() {
         let (_root, paths) = paths();
         write(&paths.portable, "[tmdb]\napi_token='  '\n");
 
+        let loaded = load_config(&paths).unwrap();
+
+        assert_eq!(loaded.value.tmdb.api_token.expose_for_request(), "");
+        assert_eq!(loaded.value.screenshot.count, 3);
+        assert!(loaded.value.screenshot.timestamps.is_empty());
+        assert!(loaded.value.screenshot.subtitles);
+        assert_eq!(
+            loaded.value.screenshot.subtitle_languages,
+            ["zh-CN", "zh", "chs", "chi"]
+        );
+    }
+
+    #[test]
+    fn loads_explicit_screenshot_configuration() {
+        let (_root, paths) = paths();
+        write(
+            &paths.portable,
+            "[tmdb]\napi_token=''\n[screenshot]\ncount=5\ntimestamps=['00:10:00','65%']\nsubtitles=false\nsubtitle_languages=['en-US','en']\n",
+        );
+
+        let loaded = load_config(&paths).unwrap();
+
+        assert_eq!(loaded.value.screenshot.count, 5);
+        assert_eq!(loaded.value.screenshot.timestamps, ["00:10:00", "65%"]);
+        assert!(!loaded.value.screenshot.subtitles);
+        assert_eq!(loaded.value.screenshot.subtitle_languages, ["en-US", "en"]);
+    }
+
+    #[test]
+    fn rejects_screenshot_count_outside_one_to_one_hundred() {
+        for count in [0, 101] {
+            let (_root, paths) = paths();
+            write(
+                &paths.portable,
+                &format!("[tmdb]\napi_token=''\n[screenshot]\ncount={count}\n"),
+            );
+
+            let error = load_config(&paths).unwrap_err().to_string();
+
+            assert!(error.contains("screenshot.count"));
+        }
+    }
+
+    #[test]
+    fn rejects_empty_subtitle_language_priority() {
+        let (_root, paths) = paths();
+        write(
+            &paths.portable,
+            "[tmdb]\napi_token=''\n[screenshot]\nsubtitle_languages=[]\n",
+        );
+
         let error = load_config(&paths).unwrap_err().to_string();
 
-        assert!(error.contains("api_token"));
-        assert!(!error.contains("'  '"));
+        assert!(error.contains("subtitle_languages"));
     }
 
     #[test]
@@ -354,7 +488,7 @@ mod tests {
         let original = fs::read_to_string(&created).unwrap();
 
         assert_eq!(created, paths.portable);
-        assert_eq!(original, "[tmdb]\napi_token = \"\"\nlanguage = \"zh-CN\"\n");
+        assert_eq!(original, CONFIG_TEMPLATE);
         assert!(init_config(&paths).is_err());
         assert_eq!(fs::read_to_string(created).unwrap(), original);
     }

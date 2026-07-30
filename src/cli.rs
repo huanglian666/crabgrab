@@ -11,8 +11,13 @@ use crate::artwork::DownloadError;
 use crate::artwork::{ReqwestBinaryFetcher, install_artwork};
 use crate::config::{ConfigError, init_config, load_config, resolve_config_paths};
 use crate::domain::{ResourceId, ResourceIdError};
-use crate::media_info::{MediaAnalyzer, MediaInfoError, ProcessMediaAnalyzer, generate_report};
+use crate::media_info::{
+    MediaAnalyzer, MediaInfoError, MediaProber, ProcessMediaAnalyzer, generate_report,
+};
 use crate::providers::{ProviderError, ProviderRegistry, TmdbProvider};
+use crate::screenshot::{
+    FrameExtractor, ProcessFrameExtractor, ScreenshotError, generate_screenshots,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -48,6 +53,12 @@ enum Command {
         #[arg(short = 'o', long, value_name = "DIRECTORY")]
         output: PathBuf,
     },
+    Sc {
+        #[arg(short = 'i', long, value_name = "FILE")]
+        input: PathBuf,
+        #[arg(short = 'o', long, value_name = "DIRECTORY")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -67,6 +78,10 @@ pub enum AppError {
     Download(#[from] DownloadError),
     #[error(transparent)]
     MediaInfo(#[from] MediaInfoError),
+    #[error(transparent)]
+    Screenshot(#[from] ScreenshotError),
+    #[error("screenshot services were not configured")]
+    ScreenshotServices,
     #[error("cannot determine current executable: {0}")]
     Executable(std::io::Error),
     #[error("failed to create HTTP client: {0}")]
@@ -85,7 +100,14 @@ pub fn run_default() -> Result<(), AppError> {
 /// 使用指定可执行文件路径执行命令，便于隔离测试配置查找行为。
 pub fn run(cli: Cli, executable: PathBuf) -> Result<(), AppError> {
     let analyzer = ProcessMediaAnalyzer::bundled(&executable);
-    run_with_services(cli, executable, None, &analyzer)
+    let extractor = ProcessFrameExtractor::bundled(&executable);
+    run_with_services(
+        cli,
+        executable,
+        None,
+        &analyzer,
+        Some((&analyzer, &extractor)),
+    )
 }
 
 #[doc(hidden)]
@@ -96,7 +118,14 @@ pub fn run_with_api_base(
     tmdb_api_base: Option<Url>,
 ) -> Result<(), AppError> {
     let analyzer = ProcessMediaAnalyzer::bundled(&executable);
-    run_with_services(cli, executable, tmdb_api_base, &analyzer)
+    let extractor = ProcessFrameExtractor::bundled(&executable);
+    run_with_services(
+        cli,
+        executable,
+        tmdb_api_base,
+        &analyzer,
+        Some((&analyzer, &extractor)),
+    )
 }
 
 #[doc(hidden)]
@@ -105,7 +134,17 @@ pub fn run_with_media_analyzer(
     executable: PathBuf,
     analyzer: &impl MediaAnalyzer,
 ) -> Result<(), AppError> {
-    run_with_services(cli, executable, None, analyzer)
+    run_with_services(cli, executable, None, analyzer, None)
+}
+
+#[doc(hidden)]
+pub fn run_with_screenshot_services(
+    cli: Cli,
+    executable: PathBuf,
+    media: &(impl MediaAnalyzer + MediaProber),
+    extractor: &impl FrameExtractor,
+) -> Result<(), AppError> {
+    run_with_services(cli, executable, None, media, Some((media, extractor)))
 }
 
 fn run_with_services(
@@ -113,6 +152,7 @@ fn run_with_services(
     executable: PathBuf,
     tmdb_api_base: Option<Url>,
     analyzer: &impl MediaAnalyzer,
+    screenshot_services: Option<(&dyn MediaProber, &dyn FrameExtractor)>,
 ) -> Result<(), AppError> {
     // 测试可注入本地 API 地址；生产入口传入 None，始终使用 TMDB 官方地址。
     if cli.command.is_some() && (cli.id.is_some() || cli.output.is_some()) {
@@ -137,6 +177,21 @@ fn run_with_services(
             println!("mediainfo: {}", installed.display());
             Ok(())
         }
+        Some(Command::Sc { input, output }) => {
+            let (prober, extractor) = screenshot_services.ok_or(AppError::ScreenshotServices)?;
+            let paths = resolve_config_paths(&executable)?;
+            let loaded = load_config(&paths)?;
+            let result =
+                generate_screenshots(prober, extractor, &input, &output, &loaded.value.screenshot)?;
+            for warning in &result.warnings {
+                eprintln!("warning: {warning}");
+            }
+            println!("screenshots: {}", result.directory.display());
+            println!("generated: {}", result.generated);
+            println!("subtitle: {}", result.subtitle.as_deref().unwrap_or("none"));
+            println!("timestamps: {}", result.timestamps.join(", "));
+            Ok(())
+        }
         None => {
             let id = cli.id.expect("clap requires id for download");
             let output = cli.output.expect("clap requires output for download");
@@ -144,9 +199,10 @@ fn run_with_services(
             // ID 必须先验证，非法输入不能触发配置读取或网络请求。
             let paths = resolve_config_paths(&executable)?;
             let loaded = load_config(&paths)?;
+            let tmdb_config = loaded.value.tmdb.require_token(&loaded.path)?;
             let tmdb = match tmdb_api_base {
-                Some(api_base) => TmdbProvider::with_api_base(loaded.value.tmdb, api_base)?,
-                None => TmdbProvider::new(loaded.value.tmdb)?,
+                Some(api_base) => TmdbProvider::with_api_base(tmdb_config, api_base)?,
+                None => TmdbProvider::new(tmdb_config)?,
             };
             let providers = ProviderRegistry::new(tmdb);
             // 通过注册表选择策略，使通用下载流程不依赖 TMDB 实现细节。
@@ -177,15 +233,35 @@ mod tests {
     use clap::Parser;
     use tempfile::tempdir;
 
-    use crate::media_info::{AnalyzeError, MediaAnalyzer};
+    use crate::media_info::{AnalyzeError, MediaAnalyzer, MediaProbe, MediaProber};
+    use crate::screenshot::{ExtractError, FrameExtractor, FrameRequest};
 
-    use super::{Cli, Command, run, run_with_media_analyzer};
+    use super::{Cli, Command, run, run_with_media_analyzer, run_with_screenshot_services};
 
     struct FakeAnalyzer;
 
     impl MediaAnalyzer for FakeAnalyzer {
         fn analyze(&self, _input: &Path) -> Result<String, AnalyzeError> {
             Ok("General\nFormat : MPEG-4\n\nVideo\nFormat : AVC\n".into())
+        }
+    }
+
+    impl MediaProber for FakeAnalyzer {
+        fn probe(&self, _input: &Path) -> Result<MediaProbe, AnalyzeError> {
+            Ok(MediaProbe {
+                duration_ms: 60_000,
+                has_video: true,
+                subtitles: Vec::new(),
+            })
+        }
+    }
+
+    struct FakeExtractor;
+
+    impl FrameExtractor for FakeExtractor {
+        fn extract(&self, request: &FrameRequest<'_>) -> Result<(), ExtractError> {
+            fs::write(request.output, b"\x89PNG\r\n\x1a\n").unwrap();
+            Ok(())
         }
     }
 
@@ -205,6 +281,46 @@ mod tests {
             let cli = Cli::try_parse_from(args).unwrap();
             assert!(matches!(cli.command, Some(Command::MediaInfo { .. })));
         }
+    }
+
+    #[test]
+    fn parses_sc_short_and_long_options() {
+        for args in [
+            vec!["crabgrab", "sc", "-i", "movie.mkv", "-o", "out"],
+            vec!["crabgrab", "sc", "--input", "movie.mkv", "--output", "out"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Some(Command::Sc { .. })));
+        }
+    }
+
+    #[test]
+    fn sc_dispatch_uses_screenshot_config_without_tmdb_token() {
+        let root = tempdir().unwrap();
+        let executable = root.path().join("bin/crabgrab");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(
+            executable.parent().unwrap().join("config.toml"),
+            "[tmdb]\napi_token=''\n[screenshot]\ncount=2\ntimestamps=['00:00:10','00:00:20']\nsubtitles=false\n",
+        )
+        .unwrap();
+        let input = root.path().join("Movie.mkv");
+        let output = root.path().join("result");
+        fs::write(&input, b"video").unwrap();
+        let cli = Cli::try_parse_from([
+            "crabgrab",
+            "sc",
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        run_with_screenshot_services(cli, executable, &FakeAnalyzer, &FakeExtractor).unwrap();
+
+        assert!(output.join("screenshots/01.png").is_file());
+        assert!(output.join("screenshots/02.png").is_file());
     }
 
     #[test]
@@ -245,7 +361,8 @@ mod tests {
         let config = executable.parent().unwrap().join("config.toml");
         let original = fs::read_to_string(&config).unwrap();
 
-        assert_eq!(original, "[tmdb]\napi_token = \"\"\nlanguage = \"zh-CN\"\n");
+        assert!(original.contains("[tmdb]\napi_token = \"\"\nlanguage = \"zh-CN\""));
+        assert!(original.contains("[screenshot]\ncount = 3"));
         assert!(
             run(
                 Cli::try_parse_from(["crabgrab", "config", "init"]).unwrap(),

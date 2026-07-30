@@ -1,0 +1,21 @@
+version = "8.1.2"
+release = "https://ffmpeg.org/download.html"
+license = "GPL-3.0-or-later"
+license_url = "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.1.2/COPYING.GPLv3"
+license_sha256 = "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+
+[[platform]]
+target = "aarch64-apple-darwin"
+archive_url = "https://ffmpeg.martin-riedl.de/download/macos/arm64/1783011502_8.1.2/ffmpeg.zip"
+archive_sha256 = "ef1aa60006c7b77ce170c1608c08d8e4ba1c30c5746f2ac986ded932d0ac2c3c"
+archive_entry = "ffmpeg"
+executable = "ffmpeg"
+executable_sha256 = "eaf91238e104dd0e262bc6510e25061855cc99a6955a721b0ac99660d58c473d"
+
+[[platform]]
+target = "x86_64-pc-windows-msvc"
+archive_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-29-13-36/ffmpeg-n8.1.2-31-g8c9502e9b0-win64-gpl-8.1.zip"
+archive_sha256 = "106d3f8e72b70e29f83983dbaa65efdfc5355716a5df675dc846e441929f7890"
+archive_entry = "ffmpeg-n8.1.2-31-g8c9502e9b0-win64-gpl-8.1/bin/ffmpeg.exe"
+executable = "ffmpeg.exe"
+executable_sha256 = "e155d775a7ebd9fe2400b3e880a4b3c5b03ecd34ebdb69bbe4b2787af8c4bf16"

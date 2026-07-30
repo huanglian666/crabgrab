@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::media_info::tool::verify_tool;
-use crate::media_info::{AnalyzeError, MediaAnalyzer};
+use crate::media_info::{AnalyzeError, MediaAnalyzer, MediaProbe, MediaProber, parse_probe_json};
 
 pub struct ProcessMediaAnalyzer {
     executable: PathBuf,
@@ -45,22 +45,22 @@ impl ProcessMediaAnalyzer {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(debug_assertions, target_os = "macos"))]
 fn target_triple() -> &'static str {
     "aarch64-apple-darwin"
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(debug_assertions, target_os = "windows"))]
 fn target_triple() -> &'static str {
     "x86_64-pc-windows-msvc"
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(debug_assertions, target_os = "macos"))]
 fn development_name() -> &'static str {
     "mediainfo"
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(debug_assertions, target_os = "windows"))]
 fn development_name() -> &'static str {
     "MediaInfo.exe"
 }
@@ -102,6 +102,36 @@ impl MediaAnalyzer for ProcessMediaAnalyzer {
     }
 }
 
+impl MediaProber for ProcessMediaAnalyzer {
+    fn probe(&self, input: &Path) -> Result<MediaProbe, AnalyzeError> {
+        verify_tool(&self.executable, &self.expected_sha256)
+            .map_err(|error| AnalyzeError::Failed(error.to_string()))?;
+        let output = Command::new(&self.executable)
+            .arg("--Output=JSON")
+            .arg(input)
+            .env_remove("LANGUAGE")
+            .env("LC_ALL", "en_US.UTF-8")
+            .env("LANG", "en_US.UTF-8")
+            .output()
+            .map_err(|error| {
+                AnalyzeError::Failed(format!("cannot start bundled MediaInfo: {error}"))
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.chars().take(4096).collect::<String>();
+            return Err(AnalyzeError::Failed(format!(
+                "bundled MediaInfo JSON probe exited with {}: {}",
+                output.status,
+                stderr.trim()
+            )));
+        }
+        let json = String::from_utf8(output.stdout).map_err(|_| {
+            AnalyzeError::Failed("bundled MediaInfo returned non-UTF-8 JSON".into())
+        })?;
+        parse_probe_json(&json)
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::fs;
@@ -109,7 +139,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::media_info::MediaAnalyzer;
+    use crate::media_info::{MediaAnalyzer, MediaProber};
 
     use super::ProcessMediaAnalyzer;
 
@@ -153,5 +183,33 @@ mod tests {
 
         assert!(error.to_string().contains("7"));
         assert!(error.to_string().contains("bad media"));
+    }
+
+    #[test]
+    fn probes_json_with_output_option_and_preserves_input_path() {
+        let root = tempdir().unwrap();
+        let executable = root.path().join("fake-mediainfo");
+        fs::write(
+            &executable,
+            r#"#!/bin/sh
+if [ "$1" != "--Output=JSON" ]; then echo 'missing json option' >&2; exit 8; fi
+if [ ! -f "$2" ]; then echo 'input path was not preserved' >&2; exit 9; fi
+printf '{"media":{"track":[{"@type":"General","Duration":"90.250"},{"@type":"Video"},{"@type":"Text","StreamKindPos":"1","Format":"ASS","Default":"Yes"}]}}'
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let hash = crate::media_info::tool::sha256(&executable).unwrap();
+        let input = root.path().join("中文 ; $movie.mkv");
+        fs::write(&input, b"fixture").unwrap();
+
+        let probe = ProcessMediaAnalyzer::new(executable, hash)
+            .probe(&input)
+            .unwrap();
+
+        assert_eq!(probe.duration_ms, 90_250);
+        assert_eq!(probe.subtitles.len(), 1);
     }
 }
