@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+.crabgrab-tools/
 **/*.rs.bk
 
 # Environment files (keep shareable examples)

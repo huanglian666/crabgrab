@@ -11,6 +11,7 @@ use crate::artwork::DownloadError;
 use crate::artwork::{ReqwestBinaryFetcher, install_artwork};
 use crate::config::{ConfigError, init_config, load_config, resolve_config_paths};
 use crate::domain::{ResourceId, ResourceIdError};
+use crate::media_info::{MediaAnalyzer, MediaInfoError, ProcessMediaAnalyzer, generate_report};
 use crate::providers::{ProviderError, ProviderRegistry, TmdbProvider};
 
 #[derive(Debug, Parser)]
@@ -40,6 +41,13 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    #[command(name = "mediainfo")]
+    MediaInfo {
+        #[arg(short = 'i', long, value_name = "FILE")]
+        input: PathBuf,
+        #[arg(short = 'o', long, value_name = "DIRECTORY")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -57,6 +65,8 @@ pub enum AppError {
     Provider(#[from] ProviderError),
     #[error(transparent)]
     Download(#[from] DownloadError),
+    #[error(transparent)]
+    MediaInfo(#[from] MediaInfoError),
     #[error("cannot determine current executable: {0}")]
     Executable(std::io::Error),
     #[error("failed to create HTTP client: {0}")]
@@ -74,7 +84,8 @@ pub fn run_default() -> Result<(), AppError> {
 
 /// 使用指定可执行文件路径执行命令，便于隔离测试配置查找行为。
 pub fn run(cli: Cli, executable: PathBuf) -> Result<(), AppError> {
-    run_with_api_base(cli, executable, None)
+    let analyzer = ProcessMediaAnalyzer::bundled(&executable);
+    run_with_services(cli, executable, None, &analyzer)
 }
 
 #[doc(hidden)]
@@ -83,6 +94,25 @@ pub fn run_with_api_base(
     cli: Cli,
     executable: PathBuf,
     tmdb_api_base: Option<Url>,
+) -> Result<(), AppError> {
+    let analyzer = ProcessMediaAnalyzer::bundled(&executable);
+    run_with_services(cli, executable, tmdb_api_base, &analyzer)
+}
+
+#[doc(hidden)]
+pub fn run_with_media_analyzer(
+    cli: Cli,
+    executable: PathBuf,
+    analyzer: &impl MediaAnalyzer,
+) -> Result<(), AppError> {
+    run_with_services(cli, executable, None, analyzer)
+}
+
+fn run_with_services(
+    cli: Cli,
+    executable: PathBuf,
+    tmdb_api_base: Option<Url>,
+    analyzer: &impl MediaAnalyzer,
 ) -> Result<(), AppError> {
     // 测试可注入本地 API 地址；生产入口传入 None，始终使用 TMDB 官方地址。
     if cli.command.is_some() && (cli.id.is_some() || cli.output.is_some()) {
@@ -100,6 +130,11 @@ pub fn run_with_api_base(
                 "created configuration at {}\nfill in [tmdb].api_token before downloading",
                 path.display()
             );
+            Ok(())
+        }
+        Some(Command::MediaInfo { input, output }) => {
+            let installed = generate_report(analyzer, &input, &output)?;
+            println!("mediainfo: {}", installed.display());
             Ok(())
         }
         None => {
@@ -137,11 +172,64 @@ pub fn run_with_api_base(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use clap::Parser;
     use tempfile::tempdir;
 
-    use super::{Cli, run};
+    use crate::media_info::{AnalyzeError, MediaAnalyzer};
+
+    use super::{Cli, Command, run, run_with_media_analyzer};
+
+    struct FakeAnalyzer;
+
+    impl MediaAnalyzer for FakeAnalyzer {
+        fn analyze(&self, _input: &Path) -> Result<String, AnalyzeError> {
+            Ok("General\nFormat : MPEG-4\n\nVideo\nFormat : AVC\n".into())
+        }
+    }
+
+    #[test]
+    fn parses_mediainfo_short_and_long_options() {
+        for args in [
+            vec!["crabgrab", "mediainfo", "-i", "movie.mp4", "-o", "out"],
+            vec![
+                "crabgrab",
+                "mediainfo",
+                "--input",
+                "movie.mp4",
+                "--output",
+                "out",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Some(Command::MediaInfo { .. })));
+        }
+    }
+
+    #[test]
+    fn mediainfo_dispatch_does_not_need_tmdb_configuration() {
+        let root = tempdir().unwrap();
+        let executable = root.path().join("bin/crabgrab");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let input = root.path().join("影片.mp4");
+        fs::write(&input, b"fixture").unwrap();
+        let output = root.path().join("result");
+        let cli = Cli::try_parse_from([
+            "crabgrab",
+            "mediainfo",
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        run_with_media_analyzer(cli, executable.clone(), &FakeAnalyzer).unwrap();
+
+        assert!(output.join("mediainfo.txt").is_file());
+        assert!(!executable.parent().unwrap().join("config.toml").exists());
+    }
 
     #[test]
     fn config_init_creates_template_without_overwriting_it() {

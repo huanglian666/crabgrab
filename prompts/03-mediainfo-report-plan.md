@@ -1,332 +1,206 @@
-# CrabGrab MediaInfo Report Implementation Plan
+# CrabGrab 便携式 MediaInfo 报告实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **执行要求：** 按任务顺序实施并使用测试驱动开发。直接在 `/Users/huanglian/Desktop/rust_code/crabgrab` 工作，不创建 Git worktree。用户手动验收前不得暂存或提交代码。
 
-**Goal:** Add `crabgrab mediainfo -i <FILE> -o <DIRECTORY>` that writes MediaInfoLib's English standard text report to `mediainfo.txt` without requiring users to install MediaInfo.
+**目标：** 实现 `crabgrab mediainfo -i <文件> -o <目录>`，驱动随便携包分发的固定版本 MediaInfo CLI，生成英文标准文本 `mediainfo.txt`。
 
-**Architecture:** Rust owns CLI dispatch, validation, report normalization, and transactional file replacement. A safe Rust wrapper calls a narrow C ABI implemented by a small C++ bridge; MediaInfoLib and ZenLib are pinned and statically linked into CrabGrab for Windows x86_64 and macOS arm64.
+**架构：** Rust 负责 CLI、文件验证、辅助程序定位与完整性检查、子进程调用、报告验证和事务式写入。MediaInfo 使用官方预编译程序，不进入 Git，不参与 Cargo 编译。
 
-**Tech Stack:** Rust 2024, clap, thiserror, tempfile, CMake, C++17, MediaInfoLib, ZenLib, GitHub Actions.
+**技术栈：** Rust 2024、clap、thiserror、tempfile、SHA-256、`std::process::Command`、GitHub Actions、MediaInfo CLI。
 
-## Global Constraints
+## 全局约束
 
-- Work directly in `/Users/huanglian/Desktop/rust_code/crabgrab`; do not create a Git worktree.
-- Keep the existing TMDB top-level `-i/--id -o/--output`, config, version, and help behavior unchanged.
-- The MediaInfo command performs no network access and does not read TMDB configuration.
-- Reports use MediaInfoLib's standard, non-`Complete`, English text view encoded as UTF-8.
-- Normalize report line endings to LF and end the file with exactly one LF.
-- Existing `mediainfo.txt` is replaced transactionally; failures preserve or restore the old file.
-- Official release targets are `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`; Linux remains an uncommitted future target.
-- End users must not need a MediaInfo executable or shared library.
-- Use TDD for every Rust behavior and verify all existing tests remain green.
+- 不使用 C++、CMake、FFI、MediaInfoLib 源码、静态链接、`build.rs` 或 Git submodule。
+- 不修改现有 TMDB 顶层参数、配置、版本和帮助行为。
+- MediaInfo 子命令不读取 TMDB 配置、不访问网络。
+- 只使用 CrabGrab 便携包中的固定 MediaInfo；不搜索 `PATH`，不自动下载。
+- 普通 `cargo build` 和 `cargo test` 不下载或启动真实 MediaInfo。
+- 报告使用英文标准文本，不使用 `--Full` 或 `--Language=raw`。
+- 输出统一为 UTF-8、LF，并以一个换行结束。
+- 已有报告安全覆盖，失败时保留或恢复旧报告。
+- 正式目标为 Windows x86_64 和 macOS arm64；Linux 延后。
+- MediaInfo 二进制、下载包和提取目录必须被 Git 忽略。
+- 每完成一个任务运行聚焦测试；最终统一验证，但不自动提交。
 
 ---
 
-### Task 1: Rust report workflow and transactional installation
+## 任务 1：报告工作流与事务式写入
 
-**Files:**
-- Create: `src/media_info.rs`
-- Create: `src/media_info/install.rs`
-- Modify: `src/lib.rs`
-- Test: unit tests inside `src/media_info.rs` and `src/media_info/install.rs`
+**文件：**
 
-**Interfaces:**
-- Produces: `pub trait MediaAnalyzer { fn analyze(&self, input: &Path) -> Result<String, AnalyzeError>; }`
-- Produces: `pub fn generate_report(analyzer: &impl MediaAnalyzer, input: &Path, output: &Path) -> Result<PathBuf, MediaInfoError>`
-- Produces: `pub(crate) fn install_report(report: &str, output: &Path) -> Result<PathBuf, InstallError>`
+- 新建：`src/media_info.rs`
+- 新建：`src/media_info/install.rs`
+- 修改：`src/lib.rs`
 
-- [ ] **Step 1: Write failing workflow tests**
-
-Add tests with a `FakeAnalyzer` that returns a report or an error. Cover: missing input, directory input, output-directory creation, extensionless input acceptance, empty report rejection, General-only report rejection, CRLF normalization, exactly one trailing LF, old-report replacement, and preservation of the old report when analysis fails.
-
-Core success test:
+**接口：**
 
 ```rust
-#[test]
-fn writes_normalized_report_and_creates_output_directory() {
-    let root = tempfile::tempdir().unwrap();
-    let input = root.path().join("影片 sample");
-    std::fs::write(&input, b"fixture").unwrap();
-    let output = root.path().join("result");
-    let analyzer = FakeAnalyzer::ok("General\r\nFormat : MPEG-4\r\n\r\nVideo\r\nFormat : AVC\r\n\r\n");
-
-    let installed = generate_report(&analyzer, &input, &output).unwrap();
-
-    assert_eq!(installed, output.join("mediainfo.txt"));
-    assert_eq!(std::fs::read_to_string(installed).unwrap(), "General\nFormat : MPEG-4\n\nVideo\nFormat : AVC\n");
+pub trait MediaAnalyzer {
+    fn analyze(&self, input: &Path) -> Result<String, AnalyzeError>;
 }
+
+pub fn generate_report(
+    analyzer: &impl MediaAnalyzer,
+    input: &Path,
+    output: &Path,
+) -> Result<PathBuf, MediaInfoError>;
 ```
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [ ] 编写失败测试：输入不存在、输入为目录、无扩展名输入、输出目录创建、空报告、只有 `General`、CRLF、末尾换行、旧报告覆盖、分析失败保留旧报告。
+- [ ] 运行 `cargo test media_info --lib`，确认测试先失败。
+- [ ] 实现输入文件可读性验证、输出目录验证和创建。
+- [ ] 验证报告包含 `General`，并至少包含一个实际媒体分区。
+- [ ] 使用同目录唯一临时文件完整写入、刷新和同步报告。
+- [ ] 通过唯一备份路径替换旧报告；替换失败时尝试回滚并保留双重错误。
+- [ ] 运行 `cargo test media_info --lib` 和 `cargo test`。
 
-Run: `cargo test media_info --lib`
+验收：假的分析器可以独立验证全部 Rust 工作流，不需要 MediaInfo 二进制。
 
-Expected: compilation fails because `media_info`, `MediaAnalyzer`, and `generate_report` do not exist.
+## 任务 2：MediaInfo CLI 子命令
 
-- [ ] **Step 3: Implement minimal workflow types and validation**
+**文件：**
 
-Implement `AnalyzeError` and `MediaInfoError` with `thiserror`. `generate_report` must open the input for reading after confirming `metadata().is_file()`, create/validate the output directory, invoke the analyzer, reject blank reports and reports without a section header among `Video`, `Audio`, `Text`, `Other`, `Image`, or `Menu`, then call `install_report`.
+- 修改：`src/cli.rs`
+- 修改：`tests/cli.rs`
+- 新建：`tests/mediainfo_cli.rs`
 
-Add `pub mod media_info;` to `src/lib.rs`.
+- [ ] 编写短参数、长参数及缺失参数的失败测试。
+- [ ] 编写注入假分析器的分派测试，证明命令不需要 TMDB 配置或 HTTP 服务。
+- [ ] 运行 `cargo test --test mediainfo_cli`，确认测试先失败。
+- [ ] 增加 `mediainfo -i/--input -o/--output` 子命令。
+- [ ] 仅做支持服务注入所需的最小分派重构。
+- [ ] 成功时输出最终 `mediainfo.txt` 路径，失败时通过统一错误返回非零状态。
+- [ ] 运行 `cargo test --test mediainfo_cli --test cli --test tmdb_cli`。
 
-- [ ] **Step 4: Implement transactional report installation**
+验收：现有 TMDB、配置、版本和帮助行为不变。
 
-Use `tempfile::NamedTempFile::new_in(output)` for the staged report and a unique `NamedTempFile`-derived backup path in the same directory. Write all bytes, call `flush()` and `as_file().sync_all()`, move an existing target to the unique backup path, persist the staged file to `mediainfo.txt`, remove the backup on success, and restore it if persistence fails. Error variants must retain the relevant path and both replacement/rollback errors when rollback fails.
+## 任务 3：固定版本工具清单
 
-- [ ] **Step 5: Run focused and full Rust tests**
+**文件：**
 
-Run: `cargo test media_info --lib`
+- 新建：`tools/mediainfo-manifest.toml`
+- 新建：`src/media_info/tool.rs`
+- 修改：`Cargo.toml`
+- 修改：`.gitignore`
 
-Expected: all MediaInfo workflow tests pass.
+工具清单必须记录 MediaInfo 版本，以及每个平台的目标三元组、官方 URL、原始包 SHA-256、提取后程序 SHA-256和程序名。
 
-Run: `cargo test`
+- [ ] 先为清单解析、目标选择、缺失文件、目录伪装、哈希不匹配和成功校验编写失败测试。
+- [ ] 选择并固定 MediaInfo 官方稳定版本，不使用 `latest` URL。
+- [ ] 实现清单解析和编译目标映射，只接受两个正式目标。
+- [ ] 增加 SHA-256 依赖并流式计算辅助程序哈希。
+- [ ] 校验程序是普通文件；macOS 同时校验可执行权限。
+- [ ] 将 `.crabgrab-tools/`、下载包和提取临时目录加入 `.gitignore`。
+- [ ] 运行 `cargo test media_info::tool --lib`。
 
-Expected: all existing and new tests pass.
+验收：辅助程序缺失或被修改时拒绝运行，不产生 `mediainfo.txt`。
 
-- [ ] **Step 6: Commit Task 1**
+## 任务 4：显式下载与提取开发工具
 
-```bash
-git add src/lib.rs src/media_info.rs src/media_info/install.rs Cargo.toml Cargo.lock
-git commit -m "feat(mediainfo): add report installation workflow"
-```
+**文件：**
 
-### Task 2: MediaInfo CLI subcommand and injectable dispatch
+- 新建：`scripts/fetch-mediainfo.sh`
+- 视 Windows 开发需要新建：`scripts/fetch-mediainfo.ps1`
+- 新建：`licenses/MediaInfo.txt`
 
-**Files:**
-- Modify: `src/cli.rs`
-- Modify: `tests/cli.rs`
-- Create: `tests/mediainfo_cli.rs`
+- [ ] 下载脚本从工具清单读取当前或指定目标平台信息。
+- [ ] 所有内容先下载到项目内或系统临时目录，不直接覆盖有效工具。
+- [ ] 下载完成后先校验官方包 SHA-256。
+- [ ] Windows 从官方 ZIP 只提取 CLI 和许可证材料。
+- [ ] macOS 挂载或解开官方 CLI DMG，只复制已编译的 `mediainfo` 和许可证材料，不执行安装脚本。
+- [ ] 校验提取后程序 SHA-256，并为 macOS 设置可执行权限。
+- [ ] 原子安装到 `.crabgrab-tools/mediainfo/<目标三元组>/`，失败时清理本次临时内容。
+- [ ] 支持重复执行；版本和哈希一致时直接成功。
+- [ ] 用错误哈希测试下载失败路径，确认旧工具不受影响。
 
-**Interfaces:**
-- Consumes: `MediaAnalyzer` and `generate_report` from Task 1.
-- Produces: `Command::MediaInfo { input: PathBuf, output: PathBuf }`
-- Produces: an internal `run_with_services` dispatcher that accepts a MediaInfo analyzer for isolated CLI tests.
+验收：脚本只下载和提取，不调用编译器，不由 Cargo 自动执行。
 
-- [ ] **Step 1: Write failing clap and dispatch tests**
+## 任务 5：安全的 MediaInfo 子进程分析器
 
-Verify both forms parse:
+**文件：**
+
+- 新建：`src/media_info/process.rs`
+- 修改：`src/media_info.rs`
+- 修改：`src/cli.rs`
+
+**接口：**
 
 ```rust
-Cli::try_parse_from(["crabgrab", "mediainfo", "-i", "movie.mp4", "-o", "out"])
-Cli::try_parse_from(["crabgrab", "mediainfo", "--input", "movie.mp4", "--output", "out"])
+pub struct ProcessMediaAnalyzer {
+    executable: PathBuf,
+}
+
+impl MediaAnalyzer for ProcessMediaAnalyzer { /* ... */ }
 ```
 
-Add negative tests for either missing argument. Add an integration-style test with a fake analyzer proving that the subcommand writes `mediainfo.txt` without a config file or HTTP server. Preserve all existing CLI assertions.
-
-- [ ] **Step 2: Run focused CLI tests and verify RED**
-
-Run: `cargo test --test mediainfo_cli`
-
-Expected: parsing fails because the `mediainfo` subcommand is absent.
-
-- [ ] **Step 3: Add the subcommand and dispatch path**
-
-Extend `Command`:
-
-```rust
-MediaInfo {
-    #[arg(short = 'i', long, value_name = "FILE")]
-    input: PathBuf,
-    #[arg(short = 'o', long, value_name = "DIRECTORY")]
-    output: PathBuf,
-},
-```
-
-Add a `MediaInfo` variant to `AppError`. Refactor only enough dispatch code to inject a `MediaAnalyzer` in tests. Production dispatch uses `NativeMediaAnalyzer` from Task 3. The TMDB branch must retain its current validation/config/network ordering.
-
-- [ ] **Step 4: Run CLI and regression tests**
-
-Run: `cargo test --test mediainfo_cli --test cli --test tmdb_cli`
-
-Expected: all listed tests pass.
-
-- [ ] **Step 5: Commit Task 2**
-
-```bash
-git add src/cli.rs tests/cli.rs tests/mediainfo_cli.rs
-git commit -m "feat(cli): add mediainfo subcommand"
-```
-
-### Task 3: Pin and build native MediaInfo dependencies
-
-**Files:**
-- Create: `.gitmodules`
-- Create: `vendor/MediaInfoLib` as a pinned Git submodule
-- Create: `vendor/ZenLib` as a pinned Git submodule
-- Create: `native/CMakeLists.txt`
-- Create: `build.rs`
-- Modify: `Cargo.toml`
-
-**Interfaces:**
-- Produces: a static native target named `crabgrab_mediainfo_bridge` consumable by Cargo.
-- Produces: build-time platform selection for Windows MSVC x86_64 and macOS arm64.
-
-- [ ] **Step 1: Add pinned upstream sources**
-
-Add official `MediaArea/MediaInfoLib` and `MediaArea/ZenLib` repositories as submodules under `vendor/`, checkout explicit commits from one compatible release, and record those commits in Git. Do not track moving branches.
-
-- [ ] **Step 2: Write the native CMake configuration**
-
-Configure C++17, disable shared libraries, and compile MediaInfoLib/ZenLib without GUI, curl/network, graph, or unrelated plugins. Define `crabgrab_mediainfo_bridge` and arrange for the final archive plus required C++ runtime libraries to be visible to Cargo.
-
-- [ ] **Step 3: Wire Cargo to CMake**
-
-Add the `cmake` crate under `[build-dependencies]`. In `build.rs`, emit `rerun-if-changed` directives for the bridge/CMake files and submodule commit directories, build the native target, emit static link search paths and libraries, and select the correct C++ runtime (`c++` on macOS; MSVC runtime is selected by the MSVC toolchain on Windows).
-
-- [ ] **Step 4: Verify the native archive builds on macOS arm64**
-
-Run: `cargo build -vv`
-
-Expected: MediaInfoLib, ZenLib, and `crabgrab_mediainfo_bridge` compile and the Rust binary links without resolving a system MediaInfo library.
-
-- [ ] **Step 5: Commit Task 3**
-
-```bash
-git add .gitmodules vendor native/CMakeLists.txt build.rs Cargo.toml Cargo.lock
-git commit -m "build(mediainfo): statically link MediaInfoLib"
-```
-
-### Task 4: C++ bridge and safe Rust wrapper
-
-**Files:**
-- Create: `native/mediainfo_bridge.h`
-- Create: `native/mediainfo_bridge.cpp`
-- Create: `src/media_info/native.rs`
-- Modify: `src/media_info.rs`
-- Test: unit tests in `src/media_info/native.rs`
-
-**Interfaces:**
-- Consumes: static native build from Task 3.
-- Produces: `pub struct NativeMediaAnalyzer;`
-- Produces: `impl MediaAnalyzer for NativeMediaAnalyzer`.
-- Produces C ABI: platform path entry points returning an owned `CrabGrabMediaInfoResult`, plus `crabgrab_mediainfo_result_free`.
-
-- [ ] **Step 1: Define the ABI header and Rust mirror**
-
-The result structure contains `status: i32`, report pointer/length, and error pointer/length. Provide a UTF-16 entry point on Windows and a byte-path entry point on Unix. Document that success has status zero and exactly one report buffer; failure has nonzero status and exactly one error buffer.
-
-- [ ] **Step 2: Write failing wrapper protocol tests**
-
-Factor result decoding into a private function whose tests use synthetic structures. Cover valid success, valid error, null result, pointer/length mismatch, both buffers set, neither buffer set, and invalid UTF-8. Confirm every owned synthetic result is released exactly once through an injectable releaser.
-
-- [ ] **Step 3: Run wrapper tests and verify RED**
-
-Run: `cargo test media_info::native --lib`
-
-Expected: compilation fails because the decoder and native analyzer do not exist.
-
-- [ ] **Step 4: Implement the C++ bridge**
-
-For Windows, construct the MediaInfo path from the provided UTF-16 range. For macOS, construct it from the supplied native byte range. Set MediaInfo options for English output and non-`Complete` mode, open exactly one file, call `Inform()`, convert the result to UTF-8, and return an owned result. Catch `std::exception` and all unknown exceptions. A single free function destroys the complete result and its buffers using the same C++ runtime that allocated them.
-
-- [ ] **Step 5: Implement the safe Rust analyzer**
-
-Keep all FFI declarations and `unsafe` blocks in `src/media_info/native.rs`. Convert Windows `OsStr` with `encode_wide`; on Unix pass `OsStrExt::as_bytes`. Check lengths before conversion to C ABI sizes. Decode and validate the result before freeing it with an RAII guard. Map all bridge/protocol failures into `AnalyzeError`.
-
-- [ ] **Step 6: Run wrapper tests and native smoke test**
-
-Run: `cargo test media_info::native --lib`
-
-Expected: protocol tests pass.
-
-Run the analyzer against the fixed fixture added in Task 5 and assert its report contains `General` and `Video`.
-
-- [ ] **Step 7: Commit Task 4**
-
-```bash
-git add native/mediainfo_bridge.h native/mediainfo_bridge.cpp native/CMakeLists.txt src/media_info.rs src/media_info/native.rs
-git commit -m "feat(mediainfo): bridge MediaInfoLib into Rust"
-```
-
-### Task 5: Cross-platform fixtures, integration coverage, and licenses
-
-**Files:**
-- Create: `tests/fixtures/sample.mp4`
-- Create: `tests/fixtures/README.md`
-- Create: `tests/native_mediainfo.rs`
-- Create: `THIRD_PARTY_LICENSES.md`
-
-**Interfaces:**
-- Consumes: `NativeMediaAnalyzer` from Task 4.
-- Produces: deterministic integration evidence for standard English report generation and non-ASCII paths.
-
-- [ ] **Step 1: Add a tiny licensed media fixture**
-
-Use a very small MP4 whose origin and redistribution terms are recorded in `tests/fixtures/README.md`. Record its SHA-256 so fixture changes are intentional.
-
-- [ ] **Step 2: Write native integration tests**
-
-Test that the fixture report contains `General`, `Video`, `Format`, and `Complete name`; copy the fixture to a temporary path containing `中文 media` and analyze it again. Test an empty file and a plain-text file return controlled errors. Normalize only absolute paths and line endings before comparing stable report fragments.
-
-- [ ] **Step 3: Run integration tests on macOS arm64**
-
-Run: `cargo test --test native_mediainfo -- --nocapture`
-
-Expected: all native tests pass without a system MediaInfo installation.
-
-- [ ] **Step 4: Add required third-party notices**
-
-Document the pinned MediaInfoLib and ZenLib versions, upstream URLs, licenses, and the MediaInfo binary redistribution attribution sentence required by the upstream license. Include notices for any optional third-party code actually compiled into the static library.
-
-- [ ] **Step 5: Commit Task 5**
-
-```bash
-git add tests/fixtures tests/native_mediainfo.rs THIRD_PARTY_LICENSES.md
-git commit -m "test(mediainfo): cover native reports and Unicode paths"
-```
-
-### Task 6: GitHub Actions release matrix and final verification
-
-**Files:**
-- Create or modify: `.github/workflows/ci.yml`
-- Create or modify: `.github/workflows/release.yml`
-
-**Interfaces:**
-- Consumes: complete Cargo/native build and fixture tests.
-- Produces: verified Windows x86_64 and macOS arm64 release archives with checksums.
-
-- [ ] **Step 1: Add CI matrix**
-
-Use `windows-latest` with `x86_64-pc-windows-msvc` and an Apple Silicon macOS runner with `aarch64-apple-darwin`. Checkout recursively with submodules. Install only build-time CMake/C++ prerequisites; do not install MediaInfo. Run formatting once and run clippy, tests, release build, native-link inspection, and CLI fixture smoke tests for each target.
-
-- [ ] **Step 2: Add release packaging**
-
-On version tags, package `crabgrab.exe` or `crabgrab`, `LICENSE`, and `THIRD_PARTY_LICENSES.md` into platform-labelled archives. Generate SHA-256 files and upload archives/checksums to the GitHub release.
-
-- [ ] **Step 3: Verify formatting, linting, tests, and release build locally**
-
-Run:
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-cargo build --release
-```
-
-Expected: every command exits zero.
-
-- [ ] **Step 4: Inspect the macOS release binary**
-
-Run: `otool -L target/release/crabgrab`
-
-Expected: no `libmediainfo.dylib` or `libzen.dylib` dependency appears.
-
-Run the release CLI against `tests/fixtures/sample.mp4` in a temporary directory and verify `mediainfo.txt` contains `General` and `Video`.
-
-- [ ] **Step 5: Review the final diff and commit**
-
-Run: `git diff --check` and `git status --short`.
-
-Commit only the CI/release files if all verification succeeds:
-
-```bash
-git add .github/workflows/ci.yml .github/workflows/release.yml
-git commit -m "ci: build embedded MediaInfo releases"
-```
-
-## Plan Self-Review
-
-- Every design requirement maps to Tasks 1–6: CLI and isolation (Task 2), validation/report transaction (Task 1), pinned static native build (Task 3), ABI and exception/memory safety (Task 4), Unicode/native behavior and licenses (Task 5), and supported-platform delivery (Task 6).
-- No Linux artifact, batch scan, custom report format, localization option, dynamic MediaInfo lookup, or unrelated TMDB refactor is included.
-- Shared type names are consistent across tasks: `MediaAnalyzer`, `AnalyzeError`, `MediaInfoError`, `NativeMediaAnalyzer`, `generate_report`, and `install_report`.
+- [ ] 使用可控的假辅助程序编写失败测试：参数原样传递、成功输出、启动失败、非零退出、空输出、非 UTF-8、标准错误截断。
+- [ ] 使用 `std::process::Command` 直接传参，禁止 Shell 和命令字符串拼接。
+- [ ] 每次只传入一个输入路径，不启用 `--Full` 或 `--Language=raw`。
+- [ ] 清理可能改变输出语言的环境变量，捕获标准输出和标准错误。
+- [ ] 对退出码和输出协议做严格验证，将错误映射为 `AnalyzeError`。
+- [ ] 生产模式从 `current_exe()/tools` 定位程序；测试和开发入口通过构造参数显式注入 `.crabgrab-tools` 路径。
+- [ ] 先完成任务 3 的完整性校验，再允许启动子进程。
+- [ ] 运行 `cargo test media_info::process --lib` 和全部 Rust 测试。
+
+验收：中文、空格和特殊字符路径作为单个操作系统参数传递，不存在 Shell 注入面。
+
+## 任务 6：真实 sidecar 集成测试与许可证
+
+**文件：**
+
+- 新建：`tests/fixtures/sample.mp4`
+- 新建：`tests/fixtures/README.md`
+- 新建：`tests/sidecar_mediainfo.rs`
+- 修改：`licenses/MediaInfo.txt`
+
+- [ ] 加入体积很小、来源和再分发条款明确的媒体样本，并记录 SHA-256。
+- [ ] 真实测试仅在显式设置测试工具路径或发布 CI 中启用；工具缺失时普通测试不得下载。
+- [ ] 验证报告包含 `General`、`Video`、`Format` 和 `Complete name`。
+- [ ] 将样本复制到包含中文、空格和特殊字符的路径后再次验证。
+- [ ] 验证空文件和文本文件产生受控错误。
+- [ ] 验证分析失败不覆盖已有报告。
+- [ ] 核对 MediaInfo 二进制再分发许可证以及实际随官方 CLI 包提供的第三方声明。
+
+验收：测试机器不安装系统 MediaInfo，也能通过随测试环境准备的固定 sidecar 完成分析。
+
+## 任务 7：GitHub Actions 便携发布包
+
+**文件：**
+
+- 新建或修改：`.github/workflows/ci.yml`
+- 新建或修改：`.github/workflows/release.yml`
+
+- [ ] 配置 Windows x86_64 与 macOS arm64 矩阵。
+- [ ] Rust 单元测试阶段不下载 MediaInfo。
+- [ ] sidecar 集成阶段按清单从官方 URL 下载并校验原始包。
+- [ ] 提取程序后再次校验程序哈希，再运行真实测试。
+- [ ] 执行格式检查、Clippy、全部测试和 Rust release 构建。
+- [ ] 组装 `crabgrab + tools/mediainfo[.exe] + licenses/MediaInfo.txt`。
+- [ ] Windows 生成平台标识 ZIP；macOS 生成平台标识 TAR.GZ。
+- [ ] 在未安装系统 MediaInfo 的环境运行便携包冒烟测试。
+- [ ] 临时移走 sidecar，确认 CrabGrab 明确失败且不回退到 `PATH`。
+- [ ] 为发布压缩包生成 SHA-256 文件并上传 GitHub Release。
+
+验收：整个发布流程不安装 CMake、不编译 MediaInfo 源码。
+
+## 任务 8：最终验证与人工验收交接
+
+- [ ] 运行 `cargo fmt --all -- --check`。
+- [ ] 运行 `cargo clippy --all-targets --all-features -- -D warnings`。
+- [ ] 运行 `cargo test --all-targets --all-features`。
+- [ ] 运行 `cargo build --release`，确认构建日志没有 CMake、C++ 或 MediaInfoLib 编译。
+- [ ] 使用用户提供的视频执行 macOS 便携目录下的 CLI 冒烟测试。
+- [ ] 检查 `mediainfo.txt` 的英文标准字段、UTF-8、LF 和安全覆盖。
+- [ ] 检查发布目录中不存在 MediaInfo 源码、头文件或动态构建缓存。
+- [ ] 运行 `git diff --check` 和 `git status --short`。
+- [ ] 向用户列出修改、测试证据和手动验收命令；不暂存、不提交。
+
+## 计划自检
+
+- CLI 与 TMDB 隔离：任务 1、2。
+- 固定版本、官方来源和完整性：任务 3、4。
+- 预编译 sidecar 驱动：任务 5。
+- Unicode 路径、真实报告和许可证：任务 6。
+- 双平台便携发布：任务 7。
+- 性能和回归验证：任务 8。
+- 计划中不存在 MediaInfoLib 源码编译、C++ 桥接、CMake、FFI、系统 `PATH` 回退、运行时下载或安装器。
