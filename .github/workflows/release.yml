@@ -1,0 +1,189 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS ARM64
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Upload macOS binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: crabgrab-macos-binary
+          path: target/release/crabgrab
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows x86_64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        shell: pwsh
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: crabgrab-windows-binary
+          path: target/release/crabgrab.exe
+          if-no-files-found: error
+
+  release:
+    name: Package and publish
+    needs:
+      - build-macos
+      - build-windows
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download macOS binary
+        uses: actions/download-artifact@v7
+        with:
+          name: crabgrab-macos-binary
+          path: build/macos
+
+      - name: Download Windows binary
+        uses: actions/download-artifact@v7
+        with:
+          name: crabgrab-windows-binary
+          path: build/windows
+
+      - name: Verify tag matches Cargo version
+        shell: bash
+        run: |
+          set -eu
+
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
+
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "tag version $tag_version does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+
+      - name: Download and verify bundled tools
+        shell: bash
+        run: |
+          set -eu
+
+          ./scripts/fetch-mediainfo.sh aarch64-apple-darwin
+          ./scripts/fetch-ffmpeg.sh aarch64-apple-darwin
+          ./scripts/fetch-mediainfo.sh x86_64-pc-windows-msvc
+          ./scripts/fetch-ffmpeg.sh x86_64-pc-windows-msvc
+
+      - name: Assemble portable packages
+        shell: bash
+        run: |
+          set -eu
+
+          version="${GITHUB_REF_NAME#v}"
+          mac_dir="dist/crabgrab-${version}-macos-arm64"
+          windows_dir="dist/crabgrab-${version}-windows-x86_64"
+
+          mkdir -p \
+            "$mac_dir/tools" \
+            "$mac_dir/licenses" \
+            "$windows_dir/tools" \
+            "$windows_dir/licenses"
+
+          cp build/macos/crabgrab "$mac_dir/crabgrab"
+          chmod 755 "$mac_dir/crabgrab"
+          cp \
+            .crabgrab-tools/mediainfo/aarch64-apple-darwin/mediainfo \
+            "$mac_dir/tools/mediainfo"
+          cp \
+            .crabgrab-tools/ffmpeg/aarch64-apple-darwin/ffmpeg \
+            "$mac_dir/tools/ffmpeg"
+          chmod 755 "$mac_dir/tools/mediainfo" "$mac_dir/tools/ffmpeg"
+
+          cp build/windows/crabgrab.exe "$windows_dir/crabgrab.exe"
+          cp \
+            .crabgrab-tools/mediainfo/x86_64-pc-windows-msvc/MediaInfo.exe \
+            "$windows_dir/tools/mediainfo.exe"
+          cp \
+            .crabgrab-tools/mediainfo/x86_64-pc-windows-msvc/LIBCURL.DLL \
+            "$windows_dir/tools/LIBCURL.DLL"
+          cp \
+            .crabgrab-tools/ffmpeg/x86_64-pc-windows-msvc/ffmpeg.exe \
+            "$windows_dir/tools/ffmpeg.exe"
+
+          cp LICENSE "$mac_dir/LICENSE"
+          cp LICENSE "$windows_dir/LICENSE"
+          cp README.md "$mac_dir/README.md"
+          cp README.md "$windows_dir/README.md"
+          cp licenses/MediaInfo.txt "$mac_dir/licenses/MediaInfo.txt"
+          cp licenses/FFmpeg.txt "$mac_dir/licenses/FFmpeg.txt"
+          cp licenses/MediaInfo.txt "$windows_dir/licenses/MediaInfo.txt"
+          cp licenses/FFmpeg.txt "$windows_dir/licenses/FFmpeg.txt"
+
+          tar -czf \
+            "dist/crabgrab-${version}-macos-arm64.tar.gz" \
+            -C dist \
+            "crabgrab-${version}-macos-arm64"
+
+          (
+            cd dist
+            zip -qr \
+              "crabgrab-${version}-windows-x86_64.zip" \
+              "crabgrab-${version}-windows-x86_64"
+          )
+
+          (
+            cd dist
+            shasum -a 256 \
+              "crabgrab-${version}-macos-arm64.tar.gz" \
+              "crabgrab-${version}-windows-x86_64.zip" \
+              > SHA256SUMS.txt
+          )
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/crabgrab-${version}-macos-arm64.tar.gz" \
+            "dist/crabgrab-${version}-windows-x86_64.zip" \
+            "dist/SHA256SUMS.txt" \
+            --verify-tag \
+            --generate-notes \
+            --title "CrabGrab $GITHUB_REF_NAME"
