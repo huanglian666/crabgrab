@@ -95,8 +95,11 @@ mount_point=
 stage=
 backup=
 cleanup() {
-    if [ -n "$mount_point" ] && mount | grep -F " on $mount_point " >/dev/null 2>&1; then
-        hdiutil detach "$mount_point" -quiet || true
+    if [ -n "$mount_point" ]; then
+        # macOS may expose /var paths as /private/var in `mount`, so matching the
+        # displayed mount path can miss an active disk image. Detaching an
+        # already-unmounted path is harmless here and cleanup must continue.
+        hdiutil detach "$mount_point" -quiet >/dev/null 2>&1 || true
     fi
     [ -z "$stage" ] || rm -rf "$stage"
     [ -z "$backup" ] || rm -rf "$backup"

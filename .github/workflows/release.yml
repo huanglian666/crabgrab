@@ -185,5 +185,14 @@ jobs:
             "dist/crabgrab-${version}-windows-x86_64.zip" \
             "dist/SHA256SUMS.txt" \
             --verify-tag \
-            --generate-notes \
+            --latest \
+            --notes "## 当前稳定版本
+
+          本版本修复了 GitHub Actions 跨平台打包与发布流程：
+
+          - 隔离 Unix 专用截图进程测试，修复 Windows 测试编译失败。
+          - 兼容 Windows 对无效父目录返回 \`NotFound\` 的行为，确保配置初始化正确回退到系统配置目录。
+          - 修复 macOS 打包时 MediaInfo DMG 未正确卸载，导致发布阶段清理失败的问题。
+
+          发布包已内置 MediaInfo 和 FFmpeg，下载对应平台压缩包并解压后即可使用。" \
             --title "CrabGrab $GITHUB_REF_NAME"
