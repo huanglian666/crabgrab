@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use reqwest::Url;
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
@@ -18,13 +18,15 @@ use crate::providers::{ProviderError, ProviderRegistry, TmdbProvider};
 use crate::screenshot::{
     FrameExtractor, ProcessFrameExtractor, ScreenshotError, generate_screenshots,
 };
+use crate::tree_report::{TreeReportError, generate_tree_report};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "crabgrab",
     version,
     disable_version_flag = true,
-    arg_required_else_help = true
+    arg_required_else_help = true,
+    group(ArgGroup::new("top_level_action").args(["id", "tree"]).multiple(false))
 )]
 pub struct Cli {
     #[arg(short = 'v', long = "version", action = ArgAction::Version)]
@@ -33,7 +35,15 @@ pub struct Cli {
     #[arg(short = 'i', long, requires = "output", value_name = "RESOURCE_ID")]
     id: Option<String>,
 
-    #[arg(short = 'o', long, requires = "id", value_name = "DIRECTORY")]
+    #[arg(short = 't', long, requires = "output", value_name = "VIDEO")]
+    tree: Option<PathBuf>,
+
+    #[arg(
+        short = 'o',
+        long,
+        requires = "top_level_action",
+        value_name = "DIRECTORY"
+    )]
     output: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -80,13 +90,15 @@ pub enum AppError {
     MediaInfo(#[from] MediaInfoError),
     #[error(transparent)]
     Screenshot(#[from] ScreenshotError),
+    #[error(transparent)]
+    TreeReport(#[from] TreeReportError),
     #[error("screenshot services were not configured")]
     ScreenshotServices,
     #[error("cannot determine current executable: {0}")]
     Executable(std::io::Error),
     #[error("failed to create HTTP client: {0}")]
     HttpClient(String),
-    #[error("download options --id/--output cannot be combined with a subcommand")]
+    #[error("top-level --id/--tree/--output options cannot be combined with a subcommand")]
     ConflictingActions,
 }
 
@@ -155,9 +167,15 @@ fn run_with_services(
     screenshot_services: Option<(&dyn MediaProber, &dyn FrameExtractor)>,
 ) -> Result<(), AppError> {
     // 测试可注入本地 API 地址；生产入口传入 None，始终使用 TMDB 官方地址。
-    if cli.command.is_some() && (cli.id.is_some() || cli.output.is_some()) {
+    if cli.command.is_some() && (cli.id.is_some() || cli.tree.is_some() || cli.output.is_some()) {
         // 子命令与下载参数是两类独立动作，禁止在一次调用中混用。
         return Err(AppError::ConflictingActions);
+    }
+    if let Some(video) = cli.tree {
+        let output = cli.output.expect("clap requires output for tree report");
+        let installed = generate_tree_report(&video, &output)?;
+        println!("tree: {}", installed.display());
+        return Ok(());
     }
     match cli.command {
         Some(Command::Config {
@@ -228,7 +246,7 @@ fn run_with_services(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use clap::Parser;
     use tempfile::tempdir;
@@ -292,6 +310,62 @@ mod tests {
             let cli = Cli::try_parse_from(args).unwrap();
             assert!(matches!(cli.command, Some(Command::Sc { .. })));
         }
+    }
+
+    #[test]
+    fn parses_tree_short_and_long_options_and_rejects_id_combination() {
+        for args in [
+            vec!["crabgrab", "-t", "movie.mkv", "-o", "out"],
+            vec!["crabgrab", "--tree", "movie.mkv", "--output", "out"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(cli.tree, Some(PathBuf::from("movie.mkv")));
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "crabgrab",
+                "-i",
+                "tmdb-movie-550",
+                "-t",
+                "movie.mkv",
+                "-o",
+                "out",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn tree_dispatch_does_not_need_tmdb_configuration_or_move_video() {
+        let root = tempdir().unwrap();
+        let executable = root.path().join("bin/crabgrab");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let input = root.path().join("火遮眼 (2025).mp4");
+        fs::write(&input, b"video").unwrap();
+        let output = root.path().join("火遮眼 (2025)");
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("01.jpg"), b"jpg").unwrap();
+        let cli = Cli::try_parse_from([
+            "crabgrab",
+            "-t",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        run(cli, executable.clone()).unwrap();
+
+        let report = output.join("火遮眼 (2025) tree.txt");
+        assert!(report.is_file());
+        assert!(
+            fs::read_to_string(report)
+                .unwrap()
+                .contains("火遮眼 (2025).mp4  [5 B]")
+        );
+        assert_eq!(fs::read(&input).unwrap(), b"video");
+        assert!(!executable.parent().unwrap().join("config.toml").exists());
     }
 
     #[test]

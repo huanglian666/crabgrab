@@ -65,6 +65,8 @@ fn help_flag_succeeds_and_displays_help() {
     assert!(visible.contains("--id"));
     assert!(visible.contains("-o"));
     assert!(visible.contains("--output"));
+    assert!(visible.contains("-t"));
+    assert!(visible.contains("--tree"));
     assert!(visible.contains("config"));
     assert!(visible.contains("sc"));
 }

@@ -5,3 +5,4 @@ pub mod domain;
 pub mod media_info;
 pub mod providers;
 pub mod screenshot;
+pub mod tree_report;
