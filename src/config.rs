@@ -282,10 +282,7 @@ pub fn init_config(paths: &ConfigPaths) -> Result<PathBuf, ConfigError> {
             Err(ConfigError::AlreadyExists(paths.portable.clone()))
         }
         Err(portable_error)
-            if !matches!(
-                portable_error.kind(),
-                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotADirectory
-            ) =>
+            if !portable_path_allows_system_fallback(&paths.portable, &portable_error) =>
         {
             Err(ConfigError::InitFailed {
                 portable: paths.portable.clone(),
@@ -321,6 +318,18 @@ pub fn init_config(paths: &ConfigPaths) -> Result<PathBuf, ConfigError> {
             Ok(paths.system.clone())
         }
     }
+}
+
+fn portable_path_allows_system_fallback(path: &Path, error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotADirectory
+    ) {
+        return true;
+    }
+
+    // Windows reports NotFound instead of NotADirectory when a parent component is a file.
+    path.parent().is_some_and(|parent| parent.is_file())
 }
 
 fn create_config(path: &Path) -> Result<(), std::io::Error> {
