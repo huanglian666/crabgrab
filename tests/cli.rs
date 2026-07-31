@@ -67,6 +67,12 @@ fn help_flag_succeeds_and_displays_help() {
     assert!(visible.contains("--output"));
     assert!(visible.contains("-t"));
     assert!(visible.contains("--tree"));
+    assert!(visible.contains("-p"));
+    assert!(visible.contains("-s"));
+    assert!(visible.contains("-m"));
+    assert!(visible.contains("RESOURCE_ID"));
+    assert!(visible.contains("VIDEO"));
+    assert!(visible.contains("crabgrab -psmt"));
     assert!(visible.contains("config"));
     assert!(visible.contains("sc"));
 }

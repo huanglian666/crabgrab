@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
@@ -26,7 +27,8 @@ use crate::tree_report::{TreeReportError, generate_tree_report};
     version,
     disable_version_flag = true,
     arg_required_else_help = true,
-    group(ArgGroup::new("top_level_action").args(["id", "tree"]).multiple(false))
+    after_help = "Combined actions:\n  crabgrab -p <RESOURCE_ID> <OUTPUT>\n  crabgrab -smt <VIDEO> <OUTPUT>\n  crabgrab -psmt <RESOURCE_ID> <VIDEO> <OUTPUT>",
+    group(ArgGroup::new("top_level_action").args(["id", "legacy_tree"]).multiple(false))
 )]
 pub struct Cli {
     #[arg(short = 'v', long = "version", action = ArgAction::Version)]
@@ -35,8 +37,25 @@ pub struct Cli {
     #[arg(short = 'i', long, requires = "output", value_name = "RESOURCE_ID")]
     id: Option<String>,
 
-    #[arg(short = 't', long, requires = "output", value_name = "VIDEO")]
-    tree: Option<PathBuf>,
+    #[arg(short = 'p', action = ArgAction::SetTrue, help = "Download poster artwork")]
+    poster: bool,
+
+    #[arg(short = 's', action = ArgAction::SetTrue, help = "Generate screenshots")]
+    screenshots: bool,
+
+    #[arg(short = 'm', action = ArgAction::SetTrue, help = "Generate MediaInfo report")]
+    media_info: bool,
+
+    #[arg(short = 't', action = ArgAction::SetTrue, help = "Generate tree report")]
+    tree: bool,
+
+    #[arg(
+        long = "tree",
+        requires = "output",
+        value_name = "VIDEO",
+        help = "Deprecated tree syntax; prefer -t <VIDEO> <OUTPUT>"
+    )]
+    legacy_tree: Option<PathBuf>,
 
     #[arg(
         short = 'o',
@@ -46,8 +65,87 @@ pub struct Cli {
     )]
     output: Option<PathBuf>,
 
+    #[arg(
+        value_name = "ARGUMENT",
+        help = "Conditional RESOURCE_ID, VIDEO, and OUTPUT values"
+    )]
+    arguments: Vec<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActionSet {
+    poster: bool,
+    screenshots: bool,
+    media_info: bool,
+    tree: bool,
+}
+
+impl ActionSet {
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            poster: cli.poster,
+            screenshots: cli.screenshots,
+            media_info: cli.media_info,
+            tree: cli.tree,
+        }
+    }
+
+    fn any(self) -> bool {
+        self.poster || self.screenshots || self.media_info || self.tree
+    }
+
+    fn needs_video(self) -> bool {
+        self.screenshots || self.media_info || self.tree
+    }
+}
+
+#[derive(Debug)]
+struct CombinedRequest {
+    actions: ActionSet,
+    resource_id: Option<ResourceId>,
+    video: Option<PathBuf>,
+    output: PathBuf,
+}
+
+impl CombinedRequest {
+    fn parse(actions: ActionSet, arguments: &[String]) -> Result<Self, AppError> {
+        let expected = match (actions.poster, actions.needs_video()) {
+            (true, true) => 3,
+            (true, false) | (false, true) => 2,
+            (false, false) => return Err(AppError::CombinedArguments),
+        };
+        if arguments.len() != expected {
+            return Err(AppError::CombinedArguments);
+        }
+
+        let (resource_id, video, output) = match (actions.poster, actions.needs_video()) {
+            (true, true) => (
+                Some(arguments[0].parse::<ResourceId>()?),
+                Some(PathBuf::from(&arguments[1])),
+                PathBuf::from(&arguments[2]),
+            ),
+            (true, false) => (
+                Some(arguments[0].parse::<ResourceId>()?),
+                None,
+                PathBuf::from(&arguments[1]),
+            ),
+            (false, true) => (
+                None,
+                Some(PathBuf::from(&arguments[0])),
+                PathBuf::from(&arguments[1]),
+            ),
+            (false, false) => unreachable!("no actions rejected above"),
+        };
+        Ok(Self {
+            actions,
+            resource_id,
+            video,
+            output,
+        })
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -100,6 +198,20 @@ pub enum AppError {
     HttpClient(String),
     #[error("top-level --id/--tree/--output options cannot be combined with a subcommand")]
     ConflictingActions,
+    #[error(
+        "invalid combined arguments; use `crabgrab -p <RESOURCE_ID> <OUTPUT>`, `crabgrab -smt <VIDEO> <OUTPUT>`, or `crabgrab -psmt <RESOURCE_ID> <VIDEO> <OUTPUT>`"
+    )]
+    CombinedArguments,
+    #[error("cannot inspect combined media input {path}: {source}")]
+    CombinedInput {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("cannot prepare combined output directory {path}: {source}")]
+    CombinedOutput {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 /// 解析当前进程参数，并使用当前可执行文件位置启动应用。
@@ -166,12 +278,105 @@ fn run_with_services(
     analyzer: &impl MediaAnalyzer,
     screenshot_services: Option<(&dyn MediaProber, &dyn FrameExtractor)>,
 ) -> Result<(), AppError> {
+    let actions = ActionSet::from_cli(&cli);
+    if actions.any() {
+        if cli.command.is_some()
+            || cli.id.is_some()
+            || cli.legacy_tree.is_some()
+            || cli.output.is_some()
+        {
+            return Err(AppError::ConflictingActions);
+        }
+        let request = CombinedRequest::parse(actions, &cli.arguments)?;
+        if let Some(video) = &request.video {
+            let metadata = fs::metadata(video).map_err(|source| AppError::CombinedInput {
+                path: video.clone(),
+                source,
+            })?;
+            if !metadata.is_file() {
+                return Err(AppError::CombinedInput {
+                    path: video.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "path is not a regular file",
+                    ),
+                });
+            }
+        }
+        fs::create_dir_all(&request.output).map_err(|source| AppError::CombinedOutput {
+            path: request.output.clone(),
+            source,
+        })?;
+        let mut completed = Vec::new();
+        if request.actions.poster {
+            let resource_id = request
+                .resource_id
+                .as_ref()
+                .expect("poster action requires resource ID");
+            download_artwork(
+                &executable,
+                tmdb_api_base.clone(),
+                resource_id,
+                &request.output,
+            )?;
+            completed.push("p");
+        }
+        if request.actions.media_info {
+            let input = request
+                .video
+                .as_deref()
+                .expect("media info action requires video");
+            let installed = generate_report(analyzer, input, &request.output)?;
+            println!("mediainfo: {}", installed.display());
+            completed.push("m");
+        }
+        if request.actions.screenshots {
+            let (prober, extractor) = screenshot_services.ok_or(AppError::ScreenshotServices)?;
+            let paths = resolve_config_paths(&executable)?;
+            let loaded = load_config(&paths)?;
+            let input = request
+                .video
+                .as_deref()
+                .expect("screenshot action requires video");
+            let result = generate_screenshots(
+                prober,
+                extractor,
+                input,
+                &request.output,
+                &loaded.value.screenshot,
+            )?;
+            for warning in &result.warnings {
+                eprintln!("warning: {warning}");
+            }
+            println!("screenshots: {}", result.directory.display());
+            println!("generated: {}", result.generated);
+            println!("subtitle: {}", result.subtitle.as_deref().unwrap_or("none"));
+            println!("timestamps: {}", result.timestamps.join(", "));
+            completed.push("s");
+        }
+        if request.actions.tree {
+            let input = request
+                .video
+                .as_deref()
+                .expect("tree action requires video");
+            let installed = generate_tree_report(input, &request.output)?;
+            println!("tree: {}", installed.display());
+            completed.push("t");
+        }
+        println!("completed: {}", completed.join(","));
+        return Ok(());
+    }
+    if !cli.arguments.is_empty() {
+        return Err(AppError::CombinedArguments);
+    }
     // 测试可注入本地 API 地址；生产入口传入 None，始终使用 TMDB 官方地址。
-    if cli.command.is_some() && (cli.id.is_some() || cli.tree.is_some() || cli.output.is_some()) {
+    if cli.command.is_some()
+        && (cli.id.is_some() || cli.legacy_tree.is_some() || cli.output.is_some())
+    {
         // 子命令与下载参数是两类独立动作，禁止在一次调用中混用。
         return Err(AppError::ConflictingActions);
     }
-    if let Some(video) = cli.tree {
+    if let Some(video) = cli.legacy_tree {
         let output = cli.output.expect("clap requires output for tree report");
         let installed = generate_tree_report(&video, &output)?;
         println!("tree: {}", installed.display());
@@ -214,33 +419,39 @@ fn run_with_services(
             let id = cli.id.expect("clap requires id for download");
             let output = cli.output.expect("clap requires output for download");
             let resource_id = id.parse::<ResourceId>()?;
-            // ID 必须先验证，非法输入不能触发配置读取或网络请求。
-            let paths = resolve_config_paths(&executable)?;
-            let loaded = load_config(&paths)?;
-            let tmdb_config = loaded.value.tmdb.require_token(&loaded.path)?;
-            let tmdb = match tmdb_api_base {
-                Some(api_base) => TmdbProvider::with_api_base(tmdb_config, api_base)?,
-                None => TmdbProvider::new(tmdb_config)?,
-            };
-            let providers = ProviderRegistry::new(tmdb);
-            // 通过注册表选择策略，使通用下载流程不依赖 TMDB 实现细节。
-            let artwork = providers
-                .provider(resource_id.provider)
-                .artwork(&resource_id)?;
-            let client = Client::builder()
-                // 原图可能较大，因此图片下载使用比元数据请求更宽松的总超时。
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(60))
-                .redirect(Policy::limited(5))
-                .build()
-                .map_err(|error| AppError::HttpClient(error.to_string()))?;
-            let installed = install_artwork(&ReqwestBinaryFetcher::new(client), &artwork, &output)?;
-            // 两张图片全部提交成功后，才向用户输出最终路径。
-            println!("background: {}", installed.background.display());
-            println!("cover: {}", installed.cover.display());
-            Ok(())
+            download_artwork(&executable, tmdb_api_base, &resource_id, &output)
         }
     }
+}
+
+fn download_artwork(
+    executable: &Path,
+    tmdb_api_base: Option<Url>,
+    resource_id: &ResourceId,
+    output: &Path,
+) -> Result<(), AppError> {
+    // ID 必须先验证，非法输入不能触发配置读取或网络请求。
+    let paths = resolve_config_paths(executable)?;
+    let loaded = load_config(&paths)?;
+    let tmdb_config = loaded.value.tmdb.require_token(&loaded.path)?;
+    let tmdb = match tmdb_api_base {
+        Some(api_base) => TmdbProvider::with_api_base(tmdb_config, api_base)?,
+        None => TmdbProvider::new(tmdb_config)?,
+    };
+    let providers = ProviderRegistry::new(tmdb);
+    let artwork = providers
+        .provider(resource_id.provider)
+        .artwork(resource_id)?;
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .redirect(Policy::limited(5))
+        .build()
+        .map_err(|error| AppError::HttpClient(error.to_string()))?;
+    let installed = install_artwork(&ReqwestBinaryFetcher::new(client), &artwork, output)?;
+    println!("background: {}", installed.background.display());
+    println!("cover: {}", installed.cover.display());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -254,7 +465,9 @@ mod tests {
     use crate::media_info::{AnalyzeError, MediaAnalyzer, MediaProbe, MediaProber};
     use crate::screenshot::{ExtractError, FrameExtractor, FrameRequest};
 
-    use super::{Cli, Command, run, run_with_media_analyzer, run_with_screenshot_services};
+    use super::{
+        AppError, Cli, Command, run, run_with_media_analyzer, run_with_screenshot_services,
+    };
 
     struct FakeAnalyzer;
 
@@ -274,6 +487,14 @@ mod tests {
         }
     }
 
+    struct FailingAnalyzer;
+
+    impl MediaAnalyzer for FailingAnalyzer {
+        fn analyze(&self, _input: &Path) -> Result<String, AnalyzeError> {
+            Err(AnalyzeError::Failed("fixture failure".into()))
+        }
+    }
+
     struct FakeExtractor;
 
     impl FrameExtractor for FakeExtractor {
@@ -281,6 +502,59 @@ mod tests {
             fs::write(request.output, b"\x89PNG\r\n\x1a\n").unwrap();
             Ok(())
         }
+    }
+
+    #[test]
+    fn parses_combined_short_actions() {
+        assert!(
+            Cli::try_parse_from(["crabgrab", "-psmt", "tmdb-movie-550", "movie.mkv", "out",])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn parses_standalone_combined_mediainfo_action() {
+        assert!(Cli::try_parse_from(["crabgrab", "-m", "movie.mkv", "out"]).is_ok());
+    }
+
+    #[test]
+    fn combined_actions_reject_wrong_positional_arity() {
+        let root = tempdir().unwrap();
+        let executable = root.path().join("bin/crabgrab");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+
+        for args in [
+            vec!["crabgrab", "-m", "movie.mkv"],
+            vec!["crabgrab", "-p", "tmdb-movie-550", "movie.mkv", "out"],
+            vec!["crabgrab", "movie.mkv", "out"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(
+                run_with_media_analyzer(cli, executable.clone(), &FakeAnalyzer),
+                Err(AppError::CombinedArguments)
+            ));
+        }
+    }
+
+    #[test]
+    fn combined_video_validation_happens_before_poster_configuration() {
+        let root = tempdir().unwrap();
+        let executable = root.path().join("bin/crabgrab");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let missing = root.path().join("missing.mkv");
+        let output = root.path().join("out");
+        let cli = Cli::try_parse_from([
+            "crabgrab",
+            "-pm",
+            "tmdb-movie-550",
+            missing.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        let error = run_with_media_analyzer(cli, executable, &FakeAnalyzer).unwrap_err();
+        assert!(error.to_string().contains("combined media input"));
+        assert!(!output.exists());
     }
 
     #[test]
@@ -313,21 +587,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_tree_short_and_long_options_and_rejects_id_combination() {
-        for args in [
-            vec!["crabgrab", "-t", "movie.mkv", "-o", "out"],
-            vec!["crabgrab", "--tree", "movie.mkv", "--output", "out"],
-        ] {
-            let cli = Cli::try_parse_from(args).unwrap();
-            assert_eq!(cli.tree, Some(PathBuf::from("movie.mkv")));
-        }
+    fn parses_legacy_tree_long_option_and_rejects_id_combination() {
+        let cli =
+            Cli::try_parse_from(["crabgrab", "--tree", "movie.mkv", "--output", "out"]).unwrap();
+        assert_eq!(cli.legacy_tree, Some(PathBuf::from("movie.mkv")));
 
         assert!(
             Cli::try_parse_from([
                 "crabgrab",
                 "-i",
                 "tmdb-movie-550",
-                "-t",
+                "--tree",
                 "movie.mkv",
                 "-o",
                 "out",
@@ -350,14 +620,13 @@ mod tests {
             "crabgrab",
             "-t",
             input.to_str().unwrap(),
-            "-o",
             output.to_str().unwrap(),
         ])
         .unwrap();
 
         run(cli, executable.clone()).unwrap();
 
-        let report = output.join("火遮眼 (2025) tree.txt");
+        let report = output.join("火遮眼 (2025).tree.txt");
         assert!(report.is_file());
         assert!(
             fs::read_to_string(report)
@@ -419,6 +688,98 @@ mod tests {
 
         assert!(output.join("mediainfo.txt").is_file());
         assert!(!executable.parent().unwrap().join("config.toml").exists());
+    }
+
+    #[test]
+    fn combined_mediainfo_generates_report_without_tmdb_config() {
+        let root = tempdir().unwrap();
+        let executable = root.path().join("bin/crabgrab");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let input = root.path().join("影片.mp4");
+        fs::write(&input, b"fixture").unwrap();
+        let output = root.path().join("result");
+        let cli = Cli::try_parse_from([
+            "crabgrab",
+            "-m",
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        run_with_media_analyzer(cli, executable.clone(), &FakeAnalyzer).unwrap();
+
+        assert!(output.join("mediainfo.txt").is_file());
+        assert!(!executable.parent().unwrap().join("config.toml").exists());
+    }
+
+    #[test]
+    fn combined_mediainfo_runs_before_tree() {
+        let root = tempdir().unwrap();
+        let executable = root.path().join("bin/crabgrab");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let input = root.path().join("Movie.mkv");
+        fs::write(&input, b"video").unwrap();
+        let output = root.path().join("Movie");
+        let cli = Cli::try_parse_from([
+            "crabgrab",
+            "-mt",
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        run_with_media_analyzer(cli, executable, &FakeAnalyzer).unwrap();
+
+        let report = fs::read_to_string(output.join("Movie.tree.txt")).unwrap();
+        assert!(report.contains("mediainfo.txt"));
+        assert!(report.contains("Movie.mkv  [5 B]"));
+    }
+
+    #[test]
+    fn combined_failure_stops_before_tree() {
+        let root = tempdir().unwrap();
+        let executable = root.path().join("bin/crabgrab");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let input = root.path().join("Movie.mkv");
+        fs::write(&input, b"video").unwrap();
+        let output = root.path().join("Movie");
+        let cli = Cli::try_parse_from([
+            "crabgrab",
+            "-mt",
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        assert!(run_with_media_analyzer(cli, executable, &FailingAnalyzer).is_err());
+        assert!(!output.join("Movie.tree.txt").exists());
+    }
+
+    #[test]
+    fn combined_screenshot_generates_images() {
+        let root = tempdir().unwrap();
+        let executable = root.path().join("bin/crabgrab");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(
+            executable.parent().unwrap().join("config.toml"),
+            "[tmdb]\napi_token=''\n[screenshot]\ncount=2\ntimestamps=['00:00:10','00:00:20']\nsubtitles=false\n",
+        )
+        .unwrap();
+        let input = root.path().join("Movie.mkv");
+        fs::write(&input, b"video").unwrap();
+        let output = root.path().join("result");
+        let cli = Cli::try_parse_from([
+            "crabgrab",
+            "-s",
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        run_with_screenshot_services(cli, executable, &FakeAnalyzer, &FakeExtractor).unwrap();
+
+        assert!(output.join("screenshots/01.png").is_file());
+        assert!(output.join("screenshots/02.png").is_file());
     }
 
     #[test]

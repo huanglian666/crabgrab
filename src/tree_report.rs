@@ -55,7 +55,7 @@ pub fn generate_tree_report(video: &Path, output: &Path) -> Result<PathBuf, Tree
     }
 
     let output_name = directory_name(output)?;
-    let report_name = format!("{output_name}tree.txt");
+    let report_name = format!("{output_name}.tree.txt");
     let report_path = output.join(&report_name);
     let mut entries = scan_directory(output, &report_path)?;
     entries.push(Entry {
@@ -304,7 +304,7 @@ mod tests {
         let contents = fs::read_to_string(&report).unwrap();
         let size = fs::metadata(&report).unwrap().len();
 
-        assert!(contents.contains(&format!("Movie (2025) tree.txt  [{}]", format_size(size))));
+        assert!(contents.contains(&format!("Movie (2025).tree.txt  [{}]", format_size(size))));
         assert!(contents.contains("added.txt  [3 B]"));
     }
 
@@ -328,7 +328,7 @@ mod tests {
         let output = root.path().join("Movie");
         fs::create_dir(&output).unwrap();
         fs::write(output.join("Movie.mp4"), b"local").unwrap();
-        let old_report = output.join("Movie tree.txt");
+        let old_report = output.join("Movie.tree.txt");
         fs::write(&old_report, b"old report").unwrap();
         let external = root.path().join("external/Movie.mp4");
         fs::create_dir(external.parent().unwrap()).unwrap();

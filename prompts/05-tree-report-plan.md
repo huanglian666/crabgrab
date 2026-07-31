@@ -110,7 +110,7 @@ Expected: PASS，且报告元数据大小与报告内显示值一致。
 
 - [ ] **Step 1: 写入失败的解析与端到端测试**
 
-在 CLI 单元测试中覆盖 `-t movie.mp4 -o result`、`--tree movie.mp4 --output result` 和 `-i tmdb:movie:1 -t movie.mp4 -o result` 冲突。增加不需要 TMDB 配置的调度测试：创建真实视频及输出夹具，执行 CLI 后断言 `<目录名> tree.txt` 存在、包含视频条目且视频仍在原路径。
+在 CLI 单元测试中覆盖 `-t movie.mp4 -o result`、`--tree movie.mp4 --output result` 和 `-i tmdb:movie:1 -t movie.mp4 -o result` 冲突。增加不需要 TMDB 配置的调度测试：创建真实视频及输出夹具，执行 CLI 后断言 `<目录名>.tree.txt` 存在、包含视频条目且视频仍在原路径。
 
 - [ ] **Step 2: 验证 CLI 测试正确失败**
 

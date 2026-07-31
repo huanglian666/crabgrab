@@ -21,7 +21,7 @@ crabgrab --tree <VIDEO> --output <DIRECTORY>
 报告路径固定为：
 
 ```text
-<DIRECTORY>/<DIRECTORY 的文件名> tree.txt
+<DIRECTORY>/<DIRECTORY 的文件名>.tree.txt
 ```
 
 示例：
@@ -32,7 +32,7 @@ crabgrab --tree <VIDEO> --output <DIRECTORY>
 │   ├── 01.jpg  [2.35 MiB]
 │   └── 02.jpg  [2.41 MiB]
 ├── 火遮眼 (2025) mediainfo.txt  [8.42 KiB]
-├── 火遮眼 (2025) tree.txt  [1.02 KiB]
+├── 火遮眼 (2025).tree.txt  [1.02 KiB]
 └── 火遮眼 (2025).mp4  [6.81 GiB]
 ```
 
